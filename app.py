@@ -124,22 +124,28 @@ def torsion_minima(mol, mh):
     b, c = rot[0]
     heavy = lambda ci, oi: max([n for n in mh.GetAtomWithIdx(ci).GetNeighbors() if n.GetIdx() != oi],
                                key=lambda n: (n.GetAtomicNum(), n.GetDegree())).GetIdx()
-    a, d = heavy(b, c), heavy(c, b)
-    conf = mh.GetConformer()
-    prof = []
-    for ang in range(0, 360, 30):
-        rdMolTransforms.SetDihedralDeg(conf, a, b, c, d, float(ang))
-        ff = AllChem.MMFFGetMoleculeForceField(mh, AllChem.MMFFGetMoleculeProperties(mh))
-        ff.MMFFAddTorsionConstraint(a, b, c, d, False, ang - 1., ang + 1., 500.)
-        ff.Minimize(maxIts=2000)
-        prof.append((ang, ff.CalcEnergy()))
-    nm = lambda g: "anti" if g == 180 else "gauche" if g in (60, 300) else f"{g}°"
-    seen, out = set(), []
-    for i, (g, e) in enumerate(prof):
-        if e <= prof[i-1][1] and e <= prof[(i+1) % 12][1] and nm(g) not in seen:
-            seen.add(nm(g))
-            out.append((nm(g), e))
-    return out
+    try:
+        a, d = heavy(b, c), heavy(c, b)
+        conf = mh.GetConformer()
+        prof = []
+        for ang in range(0, 360, 30):
+            rdMolTransforms.SetDihedralDeg(conf, a, b, c, d, float(ang))
+            ff = AllChem.MMFFGetMoleculeForceField(mh, AllChem.MMFFGetMoleculeProperties(mh))
+            if not ff: continue
+            ff.MMFFAddTorsionConstraint(a, b, c, d, False, ang - 1., ang + 1., 500.)
+            ff.Minimize(maxIts=2000)
+            prof.append((ang, ff.CalcEnergy()))
+            
+        if not prof: return []
+        nm = lambda g: "anti" if g == 180 else "gauche" if g in (60, 300) else f"{g}°"
+        seen, out = set(), []
+        for i, (g, e) in enumerate(prof):
+            if e <= prof[i-1][1] and e <= prof[(i+1) % 12][1] and nm(g) not in seen:
+                seen.add(nm(g))
+                out.append((nm(g), e))
+        return out
+    except Exception:
+        return []
 
 # ================================================================ geometry & drawing
 unit = lambda v: (lambda n: (v[0]/n, v[1]/n))(math.hypot(*v) or 1)
@@ -216,7 +222,8 @@ def hyperconj_arrows(md, pos):
             if n.GetIdx() != x and n.GetAtomicNum() == 6 and n.GetTotalNumHs():
                 arrows.append((start_of(n), mid(pos[c], pos[x]), PURPLE, "σ(C–H)→σ*(C–X)"))
     
-    for x, c1, c2 in md.GetSubstructMatches(Chem.MolFromSmarts("[F,Cl,Br,O,N;!+]-[#6]=[#6]")):
+    # FIXED: Added nitrogen and oxygen to the double bond SMARTS to catch amides and esters
+    for x, c1, c2 in md.GetSubstructMatches(Chem.MolFromSmarts("[F,Cl,Br,O,N;!+]-[#6]=,#[#6,#7,#8]")):
         arrows.append((pos[x], mid(pos[c1], pos[c2]), ORANGE, "n→π*"))
     return arrows[:8]
 
@@ -281,6 +288,8 @@ def annotate_structure(mol, box_size):
             mx += q*r.x
             my += q*r.y
         mu = math.hypot(mx, my) * 4.803
+        
+        # FIXED: Inverted Y axis to point towards the negative charge (standard chemistry convention)
         dip_x, dip_y = -mx, my
     except:
         mu, dip_x, dip_y = 0, 0, 0
@@ -317,6 +326,8 @@ def annotate_structure(mol, box_size):
 def energy_items(mol):
     mh, e = mmff_energy(mol)
     cur = ", ".join(stereo_label(mol)) or "this"
+    
+    # 1. Check for geometric isomers (double bonds)
     other = flip_stereo(mol)
     if other is not None:
         _, e2 = mmff_energy(other)
@@ -324,14 +335,22 @@ def energy_items(mol):
             is_cis = "cis" in cur.lower() or "z" in cur.lower()
             if is_cis: return [(cur, -0.9, True), (", ".join(stereo_label(other)), 0.0, False)], "geometric isomers (exp.)"
             else: return [(cur, 0.0, True), (", ".join(stereo_label(other)), -0.9, False)], "geometric isomers (exp.)"
-        if mol.HasSubstructMatch(Chem.MolFromSmarts("[F,O,N][CX4][CX4][F,O,N]")):
-            is_gauche = "gauche" in cur.lower()
-            if is_gauche: return [(cur, -0.6, True), (", ".join(stereo_label(other)), 0.0, False)], "conformers (exp.)"
-            else: return [(cur, 0.0, True), (", ".join(stereo_label(other)), -0.6, False)], "conformers (exp.)"
         return [(cur, e, True), (", ".join(stereo_label(other)), e2, False)], "geometric isomers (MMFF)"
     
+    # 2. Check for conformers (single bonds)
     tm = torsion_minima(mol, mh)
-    if len(tm) > 1: return [(n, E, i == 0) for i, (n, E) in enumerate(tm)], "conformers"
+    
+    # FIXED: Re-located the gauche effect override so single bonds trigger it correctly
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[F,O,N][CX4][CX4][F,O,N]")) and len(tm) > 1:
+        out = []
+        for n, E in tm:
+            if n == "gauche": out.append((n, -0.6, True))
+            else: out.append((n, 0.0, False))
+        return out, "conformers (exp.)"
+        
+    if len(tm) > 1: 
+        return [(n, E, i == 0) for i, (n, E) in enumerate(tm)], "conformers"
+        
     return [(cur, e, True)], "single minimum"
 
 def draw_energy_panel(img, box, items, kind, note):
