@@ -1,4 +1,4 @@
-import io, math, platform, base64
+import io, math, platform
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 from rdkit import Chem, RDLogger
@@ -14,25 +14,24 @@ HYB = {Chem.HybridizationType.SP: "sp", SP2: "sp²", SP3: "sp³"}
 def font(size, bold=False):
     """Find a font that exists across Mac, Windows, and Linux (Cloud)"""
     system = platform.system()
-    if system == "Darwin":
-        fonts = ["/System/Library/Fonts/Helvetica.ttc", "/Library/Fonts/Arial.ttf"] if not bold else ["/System/Library/Fonts/Helvetica Bold.ttc", "/Library/Fonts/ArialBD.ttf"]
-    elif system == "Windows":
-        fonts = ["arialbd.ttf"] if bold else ["arial.ttf"]
-    else: # Linux
-        fonts = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"] if bold else ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
-        
-    for n in fonts:
-        try: 
-            return ImageFont.truetype(n, size)
-        except: 
-            pass
-    return ImageFont.load_default()
+    try:
+        if system == "Darwin":
+            return ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", size, index=1 if bold else 0)
+        elif system == "Windows":
+            return ImageFont.truetype("arialbd.ttf" if bold else "arial.ttf", size)
+        else: # Linux
+            return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
+    except:
+        pass
+    
+    try:
+        return ImageFont.load_default(size)
+    except:
+        return ImageFont.load_default()
 
 # ================================================================ chemistry helpers
 def name_to_smiles(name):
     name = name.strip()
-    if not name.replace("-", "").replace(",", "").replace(" ", "").isalpha() and Chem.MolFromSmiles(name) is not None:
-        return name
     
     common = {
         "ethene": "C=C", "ethylene": "C=C", "ethyne": "C#C", "acetylene": "C#C",
@@ -62,18 +61,21 @@ def name_to_smiles(name):
         "pyridine": "c1cccnc1", "furan": "o1cccc1", "thiophene": "s1cccc1",
         "oxirane": "C1CO1", "epoxide": "C1CO1", "ethylene oxide": "C1CO1",
         "cyclohexene": "C1CCCC=C1", "1,4-cyclohexadiene": "C1C=CCC=C1",
-        "benzyl alcohol": "c1ccccc1CO", "benzyl chloride": "c1ccccc1CCCl",
-        "benzyl bromide": "c1ccccc1CCBr", "benzyl amine": "c1ccccc1CCN",
-        "tert-butyl cation": "CC(C)(C)[C+]", "allyl cation": "C=C[C+]",
-        "allyl anion": "C=C[C-]", "benzyl cation": "[CH2+]c1ccccc1",
+        "benzyl alcohol": "c1ccccc1CO", "benzyl chloride": "c1ccccc1CCl",
+        "benzyl bromide": "c1ccccc1CBr", "benzyl amine": "c1ccccc1CN",
+        "tert-butyl cation": "C[C+](C)C", "allyl cation": "C=C[CH2+]",
+        "allyl anion": "C=C[CH2-]", "benzyl cation": "[CH2+]c1ccccc1",
         "benzyl anion": "[CH2-]c1ccccc1", "enol": "C=CO", "enolate": "C=C[O-]",
-        "vinyl cation": "C=[C+]", "vinyl anion": "C=[C-]",
+        "vinyl cation": "C=[CH+]", "vinyl anion": "C=[CH-]",
     }
     
     name_lower = name.lower()
     if name_lower in common:
         return common[name_lower]
     
+    if Chem.MolFromSmiles(name) is not None:
+        return name
+        
     try:
         import pubchempy as pcp
         hits = pcp.get_compounds(name, "name")
@@ -90,20 +92,20 @@ def lone_pairs(a):
 def stereo_label(mol):
     out = []
     for b in mol.GetBonds():
-        st = b.GetStereo()
-        if b.GetBondType() == Chem.BondType.DOUBLE and st != Chem.BondStereo.STEREONONE:
-            out.append("Z (cis)" if st in (Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOCIS) else "E (trans)")
-    out += [f"C{i}:{l}" for i, l in Chem.FindMolChiralCenters(mol, includeUnassigned=True, useLegacyImplementation=False)]
+        stereo_type = b.GetStereo()
+        if b.GetBondType() == Chem.BondType.DOUBLE and stereo_type != Chem.BondStereo.STEREONONE:
+            out.append("Z (cis)" if stereo_type in (Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOCIS) else "E (trans)")
+    out += [f"{mol.GetAtomWithIdx(i).GetSymbol()}{i}:{l}" for i, l in Chem.FindMolChiralCenters(mol, includeUnassigned=True, useLegacyImplementation=False)]
     return out
 
 def flip_stereo(mol):
     try:
         m = Chem.Mol(mol)
         for b in m.GetBonds():
-            st = b.GetStereo()
-            if b.GetBondType() == Chem.BondType.DOUBLE and st != Chem.BondStereo.STEREONONE:
+            stereo_type = b.GetStereo()
+            if b.GetBondType() == Chem.BondType.DOUBLE and stereo_type != Chem.BondStereo.STEREONONE:
                 new_st = {Chem.BondStereo.STEREOE: Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOZ: Chem.BondStereo.STEREOE,
-                          Chem.BondStereo.STEREOCIS: Chem.BondStereo.STEREOTRANS, Chem.BondStereo.STEREOTRANS: Chem.BondStereo.STEREOCIS}.get(st, st)
+                          Chem.BondStereo.STEREOCIS: Chem.BondStereo.STEREOTRANS, Chem.BondStereo.STEREOTRANS: Chem.BondStereo.STEREOCIS}.get(stereo_type, stereo_type)
                 b.SetStereo(new_st)
                 m2 = Chem.MolFromSmiles(Chem.MolToSmiles(m))
                 return m2 if m2 and Chem.MolToSmiles(m2) != Chem.MolToSmiles(mol) else None
@@ -147,7 +149,7 @@ def torsion_minima(mol, mh):
         nm = lambda g: "anti" if g == 180 else "gauche" if g in (60, 300) else f"{g}°"
         seen, out = set(), []
         for i, (g, e) in enumerate(prof):
-            if e <= prof[i-1][1] and e <= prof[(i+1) % 12][1] and nm(g) not in seen:
+            if e <= prof[i-1][1] and e <= prof[(i+1) % len(prof)][1] and nm(g) not in seen:
                 seen.add(nm(g))
                 out.append((nm(g), e))
         return out
@@ -471,11 +473,21 @@ def make_card(name):
         pi = sum({Chem.BondType.DOUBLE: 1, Chem.BondType.TRIPLE: 2, Chem.BondType.AROMATIC: .5}.get(b.GetBondType(), 0) for b in molH.GetBonds())
         
         dr.text((25, 14), name, font=font(30, True), fill=BLACK)
-        sub = f"{rdMolDescriptors.CalcMolFormula(mol)}   {Descriptors.MolWt(mol):.1f} g/mol   σ {sig}  π {pi:g}   {'  '.join(stereo_label(mol))}   {smiles}"
+        
+        # Trim long SMILES for display so they don't run off the canvas edge
+        display_smiles = smiles if len(smiles) <= 40 else smiles[:37] + "..."
+        sub = f"{rdMolDescriptors.CalcMolFormula(mol)}   {Descriptors.MolWt(mol):.1f} g/mol   σ {sig}  π {pi:g}   {'  '.join(stereo_label(mol))}   {display_smiles}"
         dr.text((25, 58), sub, font=font(16), fill=GRAY)
     except Exception: pass
     
     return img
+
+@st.cache_data(show_spinner=False)
+def get_card_image_bytes(name):
+    img = make_card(name)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 # ================================================================ Streamlit UI
 def main():
@@ -489,14 +501,9 @@ def main():
     if st.button("Draw") or name:
         with st.spinner("Generating card..."):
             try:
-                img = make_card(name)
+                png_bytes = get_card_image_bytes(name)
                 
-                # Convert the image to raw PNG bytes before passing to Streamlit
-                # This explicitly bypasses Streamlit's buggy PIL image serialization
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                png_bytes = buf.getvalue()
-                
+                # use_container_width suppresses warnings in the newest Streamlit versions
                 st.image(png_bytes, use_container_width=True)
                 
                 st.download_button(
