@@ -21,13 +21,9 @@ def font(size, bold=False):
             return ImageFont.truetype("arialbd.ttf" if bold else "arial.ttf", size)
         else: # Linux
             return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
-    except:
-        pass
-    
-    try:
-        return ImageFont.load_default(size)
-    except:
-        return ImageFont.load_default()
+    except: pass
+    try: return ImageFont.load_default(size)
+    except: return ImageFont.load_default()
 
 # ================================================================ chemistry helpers
 def name_to_smiles(name):
@@ -70,31 +66,26 @@ def name_to_smiles(name):
     }
     
     name_lower = name.lower()
-    if name_lower in common:
-        return common[name_lower]
-    
-    if Chem.MolFromSmiles(name) is not None:
-        return name
+    if name_lower in common: return common[name_lower]
+    if Chem.MolFromSmiles(name) is not None: return name
         
     try:
         import pubchempy as pcp
         hits = pcp.get_compounds(name, "name")
         if hits: return hits[0].isomeric_smiles or hits[0].canonical_smiles
     except: pass
-    
     raise ValueError(f"Unknown molecule '{name}'. Try: cis-1,2-difluoroethene, benzene, ethanol, C=C")
 
 def lone_pairs(a):
     ve = Chem.GetPeriodicTable().GetNOuterElecs(a.GetAtomicNum())
-    bonds = sum(b.GetBondTypeAsDouble() for b in a.GetBonds()) + a.GetTotalNumHs()
-    return max(0, int((ve - a.GetFormalCharge() - round(bonds) - a.GetNumRadicalElectrons()) // 2))
+    return max(0, (ve - a.GetFormalCharge() - a.GetTotalValence() - a.GetNumRadicalElectrons()) // 2)
 
 def stereo_label(mol):
     out = []
     for b in mol.GetBonds():
-        stereo_type = b.GetStereo()
-        if b.GetBondType() == Chem.BondType.DOUBLE and stereo_type != Chem.BondStereo.STEREONONE:
-            out.append("Z (cis)" if stereo_type in (Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOCIS) else "E (trans)")
+        st = b.GetStereo()
+        if b.GetBondType() == Chem.BondType.DOUBLE and st != Chem.BondStereo.STEREONONE:
+            out.append("Z" if st in (Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOCIS) else "E")
     out += [f"{mol.GetAtomWithIdx(i).GetSymbol()}{i}:{l}" for i, l in Chem.FindMolChiralCenters(mol, includeUnassigned=True, useLegacyImplementation=False)]
     return out
 
@@ -102,16 +93,15 @@ def flip_stereo(mol):
     try:
         m = Chem.Mol(mol)
         for b in m.GetBonds():
-            stereo_type = b.GetStereo()
-            if b.GetBondType() == Chem.BondType.DOUBLE and stereo_type != Chem.BondStereo.STEREONONE:
+            st = b.GetStereo()
+            if b.GetBondType() == Chem.BondType.DOUBLE and st != Chem.BondStereo.STEREONONE:
                 new_st = {Chem.BondStereo.STEREOE: Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOZ: Chem.BondStereo.STEREOE,
-                          Chem.BondStereo.STEREOCIS: Chem.BondStereo.STEREOTRANS, Chem.BondStereo.STEREOTRANS: Chem.BondStereo.STEREOCIS}.get(stereo_type, stereo_type)
+                          Chem.BondStereo.STEREOCIS: Chem.BondStereo.STEREOTRANS, Chem.BondStereo.STEREOTRANS: Chem.BondStereo.STEREOCIS}.get(st, st)
                 b.SetStereo(new_st)
                 m2 = Chem.MolFromSmiles(Chem.MolToSmiles(m))
                 return m2 if m2 and Chem.MolToSmiles(m2) != Chem.MolToSmiles(mol) else None
         return None
-    except Exception:
-        return None
+    except: return None
 
 def mmff_energy(mol, seed=42):
     try:
@@ -124,8 +114,23 @@ def mmff_energy(mol, seed=42):
         if not ff: return mh, 0.0
         ff.Minimize(maxIts=5000)
         return mh, ff.CalcEnergy()
-    except Exception:
-        return Chem.AddHs(mol), 0.0
+    except: return Chem.AddHs(mol), 0.0
+
+def get_3d_dipole(mol):
+    if Chem.GetFormalCharge(mol) != 0: return None
+    try:
+        mh = Chem.AddHs(mol)
+        if AllChem.EmbedMolecule(mh, randomSeed=42) != 0: return 0.0
+        AllChem.MMFFOptimizeMolecule(mh)
+        rdPartialCharges.ComputeGasteigerCharges(mh)
+        conf = mh.GetConformer()
+        mx, my, mz = 0.0, 0.0, 0.0
+        for a in mh.GetAtoms():
+            q = a.GetDoubleProp("_GasteigerCharge")
+            r = conf.GetAtomPosition(a.GetIdx())
+            mx += q*r.x; my += q*r.y; mz += q*r.z
+        return math.sqrt(mx**2 + my**2 + mz**2) * 4.803
+    except: return 0.0
 
 def torsion_minima(mol, mh):
     rot = mol.GetSubstructMatches(Chem.MolFromSmarts("[!D1&!$(*#*)]-&!@[!D1&!$(*#*)]"))
@@ -153,8 +158,7 @@ def torsion_minima(mol, mh):
                 seen.add(nm(g))
                 out.append((nm(g), e))
         return out
-    except Exception:
-        return []
+    except: return []
 
 # ================================================================ geometry & drawing
 unit = lambda v: (lambda n: (v[0]/n, v[1]/n))(math.hypot(*v) or 1)
@@ -192,13 +196,11 @@ def curved_arrow(dr, p0, p2, col, label=None, f=None, bulge=0.35, width=3, dashe
     else:
         dr.line(pts, fill=col, width=width, joint="curve")
     arrow_head(dr, pts[-1], unit((pts[-1][0]-pts[-3][0], pts[-1][1]-pts[-3][1])), col)
-    if label:
-        dr.text((c[0]+nx*10, c[1]+ny*10), label, font=f, fill=col, anchor="mm")
+    if label: dr.text((c[0]+nx*10, c[1]+ny*10), label, font=f, fill=col, anchor="mm")
 
 def draw_structure(mol, size):
     md = Chem.AddHs(mol) if mol.GetNumHeavyAtoms() <= 12 else Chem.Mol(mol)
-    try:
-        AllChem.Compute2DCoords(md)
+    try: AllChem.Compute2DCoords(md)
     except: pass
     rdCIPLabeler.AssignCIPLabels(md)
     d = rdMolDraw2D.MolDraw2DCairo(*size)
@@ -218,7 +220,7 @@ def hyperconj_arrows(md, pos):
     try:
         hs = lambda c: [n for n in c.GetNeighbors() if n.GetAtomicNum() == 1]
         start_of = lambda c: mid(pos[c.GetIdx()], pos[hs(c)[0].GetIdx()]) if hs(c) else pos[c.GetIdx()]
-        pi_atoms = {i for b in md.GetBonds() if b.GetBondType() in (Chem.BondType.DOUBLE, Chem.BondType.TRIPLE)
+        pi_atoms = {i for b in md.GetBonds() if b.GetBondType() in (Chem.BondType.DOUBLE, Chem.BondType.TRIPLE, Chem.BondType.AROMATIC)
                     for i in (b.GetBeginAtomIdx(), b.GetEndAtomIdx())}
         
         for a in md.GetAtoms():
@@ -234,12 +236,12 @@ def hyperconj_arrows(md, pos):
                 if n.GetIdx() != x and n.GetAtomicNum() == 6 and n.GetTotalNumHs():
                     arrows.append((start_of(n), mid(pos[c], pos[x]), PURPLE, "σ(C–H)→σ*(C–X)"))
         
-        for x, c1, c2 in md.GetSubstructMatches(Chem.MolFromSmarts("[F,Cl,Br,O,N;!+]-[#6]=,#[#6,#7,#8]")):
+        for x, c1, c2 in md.GetSubstructMatches(Chem.MolFromSmarts("[F,Cl,Br,O,N;!+]-[#6]=,:,#[#6,#7,#8]")):
             arrows.append((pos[x], mid(pos[c1], pos[c2]), ORANGE, "n→π*"))
-    except Exception: pass
+    except: pass
     return arrows[:8]
 
-def annotate_structure(mol, box_size):
+def annotate_structure(mol, mu_3d, box_size):
     md, img, pos = draw_structure(mol, box_size)
     fs, fxs = font(15, True), font(13)
     ov = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -247,7 +249,7 @@ def annotate_structure(mol, box_size):
     
     try:
         for b in md.GetBonds():
-            if b.GetBondType() != Chem.BondType.DOUBLE: continue
+            if b.GetBondType() not in (Chem.BondType.DOUBLE, Chem.BondType.AROMATIC): continue
             for a, o_ in ((b.GetBeginAtom(), b.GetEndAtom()), (b.GetEndAtom(), b.GetBeginAtom())):
                 p, q = pos[a.GetIdx()], pos[o_.GetIdx()]
                 bd = unit((q[0]-p[0], q[1]-p[1]))
@@ -255,7 +257,7 @@ def annotate_structure(mol, box_size):
                 for sgn, col in ((1, (60, 110, 230, 95)), (-1, (230, 80, 80, 95))):
                     c = (p[0]+sgn*perp[0]*26, p[1]+sgn*perp[1]*26)
                     od.polygon(ellipse_pts(c, (sgn*perp[0], sgn*perp[1]), 22, 11), fill=col, outline=col[:3]+(200,))
-    except Exception: pass
+    except: pass
     
     img = Image.alpha_composite(img, ov)
     dr = ImageDraw.Draw(img)
@@ -275,24 +277,32 @@ def annotate_structure(mol, box_size):
                         x, y = cx - s*math.sin(t), cy + s*math.cos(t)
                         dr.ellipse((x-3, y-3, x+3, y+3), fill=RED)
             
+            hyb = a.GetHybridization()
+            is_sp2_res = False
+            if a.GetAtomicNum() in (7, 8) and n_lp > 0 and not a.GetIsAromatic():
+                for nbr in a.GetNeighbors():
+                    if nbr.GetHybridization() == SP2 or nbr.GetIsAromatic():
+                        is_sp2_res = True; break
+            
             tag = ""
-            if a.GetAtomicNum() == 6:
-                tag = HYB.get(a.GetHybridization(), "")
-                if a.GetIsAromatic(): tag = "sp² (arom.)"
-                if a.GetFormalCharge(): tag += f" {a.GetFormalCharge():+d}"
-            elif a.GetFormalCharge():
-                tag = f"{a.GetFormalCharge():+d}"
+            if a.GetIsAromatic(): tag = "sp² (arom.)"
+            elif hyb == SP2 or is_sp2_res: tag = "sp²"
+            elif hyb == SP3: tag = "sp³"
+            elif hyb == Chem.HybridizationType.SP: tag = "sp"
+            
+            if a.GetAtomicNum() not in (6, 7, 8): tag = ""
+            if a.GetFormalCharge(): tag += f" {a.GetFormalCharge():+d}"
             
             if tag:
                 r = 48 if n_lp else 30
-                dr.text((p[0]+ad[0]*r, p[1]+ad[1]*r), tag, font=fs, fill=BLUE, anchor="mm")
-    except Exception: pass
+                dr.text((p[0]+ad[0]*r, p[1]+ad[1]*r), tag.strip(), font=fs, fill=BLUE, anchor="mm")
+    except: pass
     
     try:
         arrows = hyperconj_arrows(md, pos)
         for i, (p0, p2, col, lab) in enumerate(arrows):
             curved_arrow(dr, p0, p2, col, lab, fxs, bulge=0.35 if i % 2 == 0 else -0.35)
-    except Exception: pass
+    except: pass
     
     try:
         rdPartialCharges.ComputeGasteigerCharges(md)
@@ -301,20 +311,21 @@ def annotate_structure(mol, box_size):
         for a in md.GetAtoms():
             q = a.GetDoubleProp("_GasteigerCharge")
             if a.HasProp("_GasteigerHCharge"): q += a.GetDoubleProp("_GasteigerHCharge")
-            if math.isnan(q): raise ValueError
             r = conf.GetAtomPosition(a.GetIdx())
-            mx += q*r.x
-            my += q*r.y
-        mu = math.hypot(mx, my) * 4.803
+            mx += q*r.x; my += q*r.y
         dip_x, dip_y = -mx, my
     except:
-        mu, dip_x, dip_y = 0, 0, 0
+        dip_x, dip_y = 0, 0
     
     W, H = img.size
     bx, by = W-170, H-110
     dr.rectangle((bx, by, W-12, H-12), outline=GRAY)
     dr.text((bx+8, by+6), "dipole μ", font=fs, fill=BLACK)
-    if mu > 0.15:
+    
+    if mu_3d is None:
+        dr.text((bx+15, by+45), "N/A", font=font(22, True), fill=BLACK)
+        dr.text((bx+8, H-32), "(charged)", font=fxs, fill=GRAY)
+    elif mu_3d > 0.15:
         d = unit((dip_x, dip_y))
         c = (bx+80, by+65)
         tip = (c[0]+d[0]*45, c[1]+d[1]*45)
@@ -322,7 +333,7 @@ def annotate_structure(mol, box_size):
         dr.line((tail, tip), fill=BLACK, width=3)
         arrow_head(dr, tip, d, BLACK)
         dr.line((tail[0]-d[1]*7, tail[1]+d[0]*7, tail[0]+d[1]*7, tail[1]-d[0]*7), fill=BLACK, width=3)
-        dr.text((bx+8, H-32), f"≈ {mu:.1f} D (est.)", font=fxs, fill=GRAY)
+        dr.text((bx+8, H-32), f"≈ {mu_3d:.1f} D (3D)", font=fxs, fill=GRAY)
     else:
         dr.text((bx+30, by+45), "μ ≈ 0", font=font(22, True), fill=BLACK)
         dr.text((bx+8, H-32), "symmetric", font=fxs, fill=GRAY)
@@ -347,8 +358,8 @@ def energy_items(mol):
         other = flip_stereo(mol)
         if other is not None:
             _, e2 = mmff_energy(other)
-            if mol.HasSubstructMatch(Chem.MolFromSmarts("[F,Cl,Br,I][CX3]=[CX3][F,Cl,Br,I]")):
-                is_cis = "cis" in cur.lower() or "z" in cur.lower()
+            if mol.HasSubstructMatch(Chem.MolFromSmarts("[F,Cl]-[CH]=[CH]-[F,Cl]")):
+                is_cis = "Z" in cur.upper()
                 if is_cis: return [(cur, -0.9, True), (", ".join(stereo_label(other)), 0.0, False)], "geometric isomers (exp.)"
                 else: return [(cur, 0.0, True), (", ".join(stereo_label(other)), -0.9, False)], "geometric isomers (exp.)"
             return [(cur, e, True), (", ".join(stereo_label(other)), e2, False)], "geometric isomers (MMFF)"
@@ -359,14 +370,13 @@ def energy_items(mol):
             for n, E in tm:
                 if n == "gauche": out.append((n, -0.6, True))
                 else: out.append((n, 0.0, False))
-            return out, "conformers (exp.)"
+            return out, "representative conformers (exp.)"
             
         if len(tm) > 1: 
-            return [(n, E, i == 0) for i, (n, E) in enumerate(tm)], "conformers"
+            return [(n, E, False) for i, (n, E) in enumerate(tm)], "representative conformers"
             
-        return [(cur, e, True)], "single minimum"
-    except Exception:
-        return [("this", 0.0, True)], "calc failed"
+        return [("this", e, False)], "single minimum"
+    except: return [("this", 0.0, False)], "calc failed"
 
 def draw_energy_panel(img, box, items, kind, note):
     dr = ImageDraw.Draw(img)
@@ -397,7 +407,7 @@ def draw_energy_panel(img, box, items, kind, note):
             dr.text(((xa+xb)/2, y+8), lab + ("  ◀ you" if cur else ""), font=fs, fill=col, anchor="mt")
         
         if note: dr.text((x0+12, y1-40), note, font=fs, fill=RED)
-    except Exception: pass
+    except: pass
 
 def draw_mo_panel(img, box, mol, arrows):
     dr = ImageDraw.Draw(img)
@@ -407,13 +417,13 @@ def draw_mo_panel(img, box, mol, arrows):
     dr.text((x0+12, y0+8), "Orbital picture (qualitative)", font=fh, fill=BLACK)
     
     try:
-        has_pi = mol.HasSubstructMatch(Chem.MolFromSmarts("[#6]=,#[#6,#7,#8]")) or any(a.GetIsAromatic() for a in mol.GetAtoms())
+        has_pi = mol.HasSubstructMatch(Chem.MolFromSmarts("[#6,#7,#8]=,:,#[#6,#7,#8]")) or any(a.GetIsAromatic() for a in mol.GetAtoms())
         has_cx = mol.HasSubstructMatch(Chem.MolFromSmarts("[#6]-[F,Cl,Br,O,N]"))
         has_n = any(lone_pairs(a) for a in mol.GetAtoms())
         kinds = {a[3].split("→")[0] for a in arrows}
+        
         Hh = y1-y0
         lv = {}
-        
         def level(name, frac, x, col, occ, tag=""):
             y = y0+frac*Hh
             dr.line((x, y, x+90, y), fill=col, width=4)
@@ -423,16 +433,17 @@ def draw_mo_panel(img, box, mol, arrows):
                 for k, s in enumerate(("↑", "↓")): dr.text((x+30+k*22, y-3), s, font=font(20, True), fill=col, anchor="mb")
         
         L, M, Rr = x0+30, x0+180, x0+340
-        if has_pi:
-            level("π*", .22, M, BLUE, False, "  LUMO")
-            level("π", .52, M, BLUE, True, "  HOMO")
-        else:
-            level("σ*", .22, M, BLUE, False, "  LUMO")
-            level("σ", .60, M, BLUE, True, "  HOMO")
         
-        if has_cx: level("σ*(C–X)", .32, Rr, PURPLE, False)
-        if has_n: level("n (lone pair)", .62, L, ORANGE, True)
-        level("σ(C–H)", .76, L, GREEN, True)
+        if has_pi:
+            level("π*", 0.22, M, BLUE, False, "  LUMO" if not has_cx else "")
+            level("π", 0.65, M, BLUE, True, "  HOMO" if not has_n else "")
+        else:
+            level("σ*", 0.22, M, BLUE, False, "  LUMO" if not has_cx else "")
+            level("σ", 0.80, M, BLUE, True, "  HOMO" if not has_n else "")
+            
+        if has_cx: level("σ*(C–X)", 0.35, Rr, PURPLE, False, "  LUMO" if not has_pi else "")
+        if has_n: level("n (lone pair)", 0.50, L, ORANGE, True, "  HOMO")
+        level("σ(C–H)", 0.88 if has_pi else 0.76, L, GREEN, True)
         
         def link(a, b, col):
             if a in lv and b in lv: curved_arrow(dr, lv[a], lv[b], col, None, None, bulge=0.25, width=2, dashed=True)
@@ -442,8 +453,8 @@ def draw_mo_panel(img, box, mol, arrows):
         if "n" in kinds: link("n (lone pair)", "π*", ORANGE)
         
         dr.text((x0+12, y1-40), "dashed = donor→acceptor interaction (stabilizing)", font=fs, fill=GRAY)
-        dr.text((x0+12, y1-22), "levels are schematic, not computed", font=fs, fill=GRAY)
-    except Exception: pass
+        dr.text((x0+12, y1-22), "levels are schematic heuristics, not computed", font=fs, fill=GRAY)
+    except: pass
 
 def make_card(name):
     smiles = name_to_smiles(name)
@@ -455,13 +466,14 @@ def make_card(name):
     img = Image.new("RGB", (W, H), "white")
     dr = ImageDraw.Draw(img)
     
-    struct, arrows = annotate_structure(mol, (920, 840))
+    mu_3d = get_3d_dipole(mol)
+    struct, arrows = annotate_structure(mol, mu_3d, (920, 840))
     img.paste(struct, (25, 95))
     dr.rectangle((25, 95, 945, 935), outline=GRAY)
     
     items, kind = energy_items(mol)
     note = ""
-    if mol.HasSubstructMatch(Chem.MolFromSmarts("[F,Cl,O,N][CX3]=[CX3][F,Cl,O,N]")): note = "exp.: cis is ~0.9 kcal/mol MORE stable (cis effect: σ→σ*, n→π*)"
+    if mol.HasSubstructMatch(Chem.MolFromSmarts("[F,Cl]-[CH]=[CH]-[F,Cl]")): note = "exp.: Z is ~0.9 kcal/mol MORE stable (cis effect: σ→σ*, n→π*)"
     elif mol.HasSubstructMatch(Chem.MolFromSmarts("[F,O,N][CX4][CX4][F,O,N]")): note = "exp.: gauche favored (gauche effect)"
     
     draw_energy_panel(img, (965, 95, 1475, 470), items, kind, note)
@@ -470,15 +482,18 @@ def make_card(name):
     try:
         molH = Chem.AddHs(mol)
         sig = molH.GetNumBonds()
-        pi = sum({Chem.BondType.DOUBLE: 1, Chem.BondType.TRIPLE: 2, Chem.BondType.AROMATIC: .5}.get(b.GetBondType(), 0) for b in molH.GetBonds())
+        
+        mk = Chem.Mol(molH)
+        Chem.Kekulize(mk, clearAromaticFlags=True)
+        pi = sum({Chem.BondType.DOUBLE: 1, Chem.BondType.TRIPLE: 2}.get(b.GetBondType(), 0) for b in mk.GetBonds())
         
         dr.text((25, 14), name, font=font(30, True), fill=BLACK)
+        dr.text((800, 26), "Qualitative, auto-generated: verify with textbook. (p-lobes drawn in-plane for 2D clarity)", font=font(14, True), fill=RED)
         
-        # Trim long SMILES for display so they don't run off the canvas edge
         display_smiles = smiles if len(smiles) <= 40 else smiles[:37] + "..."
         sub = f"{rdMolDescriptors.CalcMolFormula(mol)}   {Descriptors.MolWt(mol):.1f} g/mol   σ {sig}  π {pi:g}   {'  '.join(stereo_label(mol))}   {display_smiles}"
         dr.text((25, 58), sub, font=font(16), fill=GRAY)
-    except Exception: pass
+    except: pass
     
     return img
 
@@ -502,10 +517,7 @@ def main():
         with st.spinner("Generating card..."):
             try:
                 png_bytes = get_card_image_bytes(name)
-                
-                # use_container_width suppresses warnings in the newest Streamlit versions
                 st.image(png_bytes, use_container_width=True)
-                
                 st.download_button(
                     label="Download PNG",
                     data=png_bytes,
