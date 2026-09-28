@@ -19,7 +19,7 @@ BLUE, RED, GREEN, PURPLE, GRAY, ORANGE, BLACK = (
 SP = Chem.HybridizationType.SP
 SP2 = Chem.HybridizationType.SP2
 SP3 = Chem.HybridizationType.SP3
-CACHE_VERSION = "2026-09-28-v6"
+CACHE_VERSION = "2026-09-28-v7"
 
 
 def font(size, bold=False):
@@ -343,30 +343,13 @@ def p_orbital_atoms(molecule):
     return indices
 
 
-def aromatic_orbital_direction(molecule, positions, atom):
-    aromatic_neighbors = [neighbor for neighbor in atom.GetNeighbors() if neighbor.GetIsAromatic()]
-    if len(aromatic_neighbors) >= 2:
-        first = positions[aromatic_neighbors[0].GetIdx()]
-        second = positions[aromatic_neighbors[1].GetIdx()]
-        ring_tangent = unit((second[0] - first[0], second[1] - first[1]))
-        return (-ring_tangent[1], ring_tangent[0])
-    return away_dir(positions, atom)
-
-
 def orbital_direction(molecule, positions, atom):
-    if atom.GetIsAromatic():
-        return aromatic_orbital_direction(molecule, positions, atom)
-    conjugated_neighbors = [
-        neighbor for neighbor in atom.GetNeighbors()
-        if neighbor.GetIsAromatic() or neighbor.GetHybridization() == SP2 or neighbor.GetFormalCharge() != 0
-    ]
-    if conjugated_neighbors:
-        point = positions[atom.GetIdx()]
-        target = positions[conjugated_neighbors[0].GetIdx()]
-        bond_direction = unit((target[0] - point[0], target[1] - point[1]))
-        return (-bond_direction[1], bond_direction[0])
-    return (0, -1)
+    """Return one shared screen direction for conjugated p-orbital icons.
 
+    The lobes are conceptual 2D symbols. A fixed vertical direction keeps all
+    orbitals in an aromatic or allylic system parallel and visually readable.
+    """
+    return (0.0, -1.0)
 
 def interaction_candidates(molecule, positions):
     candidates = []
@@ -415,21 +398,27 @@ def projected_dipole_direction(molecule, positions):
 
 def annotate_structure(mol, dipole_magnitude, box_size):
     drawing_mol, image, positions = draw_structure(mol, box_size)
-    label_font, small_font = font(15, True), font(13)
+    label_font, small_font = font(14, True), font(13)
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     overlay_draw = ImageDraw.Draw(overlay)
 
-    # Exactly one p-orbital pair per conjugated atom.
+    # One compact, parallel p-orbital pair per conjugated atom.
     for atom_index in sorted(p_orbital_atoms(drawing_mol)):
-        atom = drawing_mol.GetAtomWithIdx(atom_index)
         point = positions[atom_index]
-        direction = orbital_direction(drawing_mol, positions, atom)
-        for sign, color in ((1, (60, 110, 230, 95)), (-1, (230, 80, 80, 95))):
-            center = (point[0] + sign*direction[0]*26, point[1] + sign*direction[1]*26)
-            overlay_draw.polygon(ellipse_pts(center, (sign*direction[0], sign*direction[1]), 22, 11), fill=color, outline=color[:3] + (200,))
+        direction = (0.0, -1.0)
+        for sign, color in ((1, (60, 110, 230, 90)), (-1, (230, 80, 80, 90))):
+            center = (point[0] + sign*direction[0]*22, point[1] + sign*direction[1]*22)
+            overlay_draw.polygon(
+                ellipse_pts(center, (sign*direction[0], sign*direction[1]), 17, 8),
+                fill=color, outline=color[:3] + (185,)
+            )
 
     image = Image.alpha_composite(image, overlay)
     draw = ImageDraw.Draw(image)
+
+    aromatic_atoms = [atom for atom in drawing_mol.GetAtoms() if atom.GetIsAromatic()]
+    if aromatic_atoms:
+        draw.text((18, 18), "aromatic ring atoms: sp²; parallel p orbitals", font=small_font, fill=BLUE)
 
     for atom in drawing_mol.GetAtoms():
         if atom.GetAtomicNum() == 1:
@@ -437,54 +426,79 @@ def annotate_structure(mol, dipole_magnitude, box_size):
         point = positions[atom.GetIdx()]
         outward = away_dir(positions, atom)
         pair_count = lone_pairs(atom)
+
         if pair_count:
             base_angle = math.atan2(outward[1], outward[0])
             offsets = {1: [0], 2: [-50, 50], 3: [-75, 0, 75], 4: [-90, -30, 30, 90]}.get(min(pair_count, 4), [0])
             for offset in offsets:
                 angle = base_angle + math.radians(offset)
-                cx, cy = point[0] + 26*math.cos(angle), point[1] + 26*math.sin(angle)
+                cx, cy = point[0] + 27*math.cos(angle), point[1] + 27*math.sin(angle)
                 for spacing in (-4.5, 4.5):
                     x = cx - spacing*math.sin(angle)
                     y = cy + spacing*math.cos(angle)
                     draw.ellipse((x-3, y-3, x+3, y+3), fill=RED)
-        tag = hybridization_label(atom) if atom.GetAtomicNum() in (6, 7, 8) else ""
+
+        # Avoid six overlapping copies of the same aromatic-carbon label.
+        if atom.GetIsAromatic():
+            tag = ""
+        else:
+            tag = hybridization_label(atom) if atom.GetAtomicNum() in (6, 7, 8) else ""
         if atom.GetFormalCharge():
             tag = (tag + " " if tag else "") + f"{atom.GetFormalCharge():+d}"
         if tag:
-            radius = 54 if pair_count else 34
-            draw.text((point[0] + outward[0]*radius, point[1] + outward[1]*radius), tag, font=label_font, fill=BLUE, anchor="mm")
+            radius = 62 if pair_count else 40
+            draw.text(
+                (point[0] + outward[0]*radius, point[1] + outward[1]*radius),
+                tag, font=label_font, fill=BLUE, anchor="mm"
+            )
 
     candidates = interaction_candidates(drawing_mol, positions)
-    for index, (start, end, color, label, _) in enumerate(candidates):
-        curved_arrow(draw, start, end, color, label, small_font, 0.32 if index % 2 == 0 else -0.32)
+    interaction_notes = []
+    for index, (start_point, end_point, color, label, kind) in enumerate(candidates):
+        # Keep arrows clear of text. Interaction names are placed in a note block.
+        curved_arrow(
+            draw, start_point, end_point, color, None, small_font,
+            0.28 if index % 2 == 0 else -0.28
+        )
+        if label and label not in interaction_notes:
+            interaction_notes.append(label)
 
+    note_y = 40 if aromatic_atoms else 18
     if any(candidate[4] == "allyl-pi-p" for candidate in candidates):
-        draw.text((18, 18), "allylic positive charge is resonance-delocalized", font=small_font, fill=PURPLE)
+        interaction_notes.insert(0, "allylic positive charge is resonance-delocalized")
+    for index, note in enumerate(interaction_notes[:3]):
+        color = PURPLE if "allyl" in note else ORANGE
+        draw.text((18, note_y + index*18), note, font=small_font, fill=color)
 
     width, height = image.size
     bx, by = width-170, height-110
     draw.rectangle((bx, by, width-12, height-12), outline=GRAY)
     draw.text((bx+8, by+6), "dipole μ", font=label_font, fill=BLACK)
+
     if formal_charge(mol) != 0:
         draw.text((bx+15, by+45), "N/A", font=font(22, True), fill=BLACK)
-        draw.text((bx+8, height-32), "(charged species)", font=small_font, fill=GRAY)
+        draw.text((bx+8, height-32), "charged species", font=small_font, fill=GRAY)
     elif dipole_magnitude is None:
         draw.text((bx+15, by+45), "N/A", font=font(22, True), fill=BLACK)
         draw.text((bx+8, height-32), "estimate unavailable", font=small_font, fill=GRAY)
     elif dipole_magnitude > 0.15:
         direction = projected_dipole_direction(drawing_mol, positions)
         if direction:
-            center = (bx+80, by+56)
-            tip = (center[0] + direction[0]*32, center[1] + direction[1]*32)
-            tail = (center[0] - direction[0]*32, center[1] - direction[1]*32)
+            center = (bx+80, by+54)
+            tip = (center[0] + direction[0]*28, center[1] + direction[1]*28)
+            tail = (center[0] - direction[0]*28, center[1] - direction[1]*28)
             draw.line((tail, tip), fill=BLACK, width=3)
             arrow_head(draw, tip, direction, BLACK)
-            draw.line((tail[0]-direction[1]*7, tail[1]+direction[0]*7, tail[0]+direction[1]*7, tail[1]-direction[0]*7), fill=BLACK, width=3)
-        draw.text((bx+8, height-43), f"≈ {dipole_magnitude:.1f} D", font=small_font, fill=GRAY)
-        draw.text((bx+8, height-27), "Gasteiger estimate", font=font(11), fill=GRAY)
+            draw.line(
+                (tail[0]-direction[1]*7, tail[1]+direction[0]*7,
+                 tail[0]+direction[1]*7, tail[1]-direction[0]*7),
+                fill=BLACK, width=3
+            )
+        draw.text((bx+8, height-43), "polar", font=font(16, True), fill=BLACK)
+        draw.text((bx+8, height-27), "direction is approximate", font=font(11), fill=GRAY)
     else:
-        draw.text((bx+30, by+45), "μ ≈ 0", font=font(22, True), fill=BLACK)
-        draw.text((bx+8, height-32), "point-charge est.", font=small_font, fill=GRAY)
+        draw.text((bx+20, by+45), "μ ≈ 0", font=font(22, True), fill=BLACK)
+        draw.text((bx+8, height-32), "approximately nonpolar", font=font(11), fill=GRAY)
 
     lx, ly = 14, height-100
     draw.polygon(ellipse_pts((lx+14, ly+8), (0, -1), 10, 5), fill=(60, 110, 230, 120))
@@ -497,7 +511,6 @@ def annotate_structure(mol, dipole_magnitude, box_size):
     draw.line((lx+4, ly+62, lx+26, ly+62), fill=ORANGE, width=3)
     draw.text((lx+32, ly+54), "lone-pair / π conjugation", font=small_font, fill=BLACK)
     return image.convert("RGB"), candidates
-
 
 def energy_items(mol):
     assigned_ez = any("=" in label and label.endswith((":E", ":Z")) for label in stereo_label(mol))
@@ -531,11 +544,16 @@ def draw_mo_panel(image, box, mol, candidates):
     draw = ImageDraw.Draw(image)
     x0, y0, x1, y1 = box
     header_font, small_font = font(17, True), font(13)
-    draw.rectangle(box, outline=GRAY)
-    draw.text((x0+12, y0+8), "Orbital picture (qualitative)", font=header_font, fill=BLACK)
-
     kinds = {candidate[4] for candidate in candidates}
-    has_pi = any(bond.GetBondType() in (Chem.BondType.DOUBLE, Chem.BondType.TRIPLE, Chem.BondType.AROMATIC) for bond in mol.GetBonds())
+    allylic = "allyl-pi-p" in kinds
+    title = "Localized resonance interaction" if allylic else "Orbital picture (qualitative)"
+    draw.rectangle(box, outline=GRAY)
+    draw.text((x0+12, y0+8), title, font=header_font, fill=BLACK)
+
+    has_pi = any(
+        bond.GetBondType() in (Chem.BondType.DOUBLE, Chem.BondType.TRIPLE, Chem.BondType.AROMATIC)
+        for bond in mol.GetBonds()
+    )
     levels = {}
     panel_height = y1-y0
 
@@ -543,38 +561,40 @@ def draw_mo_panel(image, box, mol, candidates):
         y = y0 + fraction*panel_height
         draw.line((x, y, x+90, y), fill=color, width=4)
         levels[name] = (x+45, y)
-        draw.text((x+95, y), name, font=small_font, fill=color, anchor="lm")
+        draw.text((x+102, y), name, font=small_font, fill=color, anchor="lm")
         if occupied:
-            draw.text((x+30, y-3), "↑", font=font(20, True), fill=color, anchor="mb")
-            draw.text((x+52, y-3), "↓", font=font(20, True), fill=color, anchor="mb")
+            draw.text((x+30, y-5), "↑", font=font(19, True), fill=color, anchor="mb")
+            draw.text((x+52, y-5), "↓", font=font(19, True), fill=color, anchor="mb")
 
-    left, middle = x0+30, x0+220
+    left, middle = x0+32, x0+220
 
     if not has_pi and not kinds:
         draw.text((x0+28, y0+175), "Localized σ-bond framework", font=font(18, True), fill=BLUE)
-        draw.text((x0+28, y0+210), "No conjugated π system detected.", font=small_font, fill=GRAY)
-        draw.text((x0+28, y0+232), "No donor-acceptor interaction assigned.", font=small_font, fill=GRAY)
-    elif "allyl-pi-p" in kinds:
+        draw.text((x0+28, y0+212), "No conjugated π system detected.", font=small_font, fill=GRAY)
+        draw.text((x0+28, y0+236), "No donor-acceptor interaction assigned.", font=small_font, fill=GRAY)
+    elif allylic:
         level("empty p acceptor", 0.25, middle, PURPLE, False)
         level("π donor", 0.70, left, BLUE, True)
         curved_arrow(draw, levels["π donor"], levels["empty p acceptor"], PURPLE, dashed=True, width=2)
-        draw.text((x0+28, y0+335), "allylic charge is resonance-delocalized", font=small_font, fill=PURPLE)
+        draw.text((x0+28, y0+340), "positive charge delocalized over terminal carbons", font=small_font, fill=PURPLE)
     else:
         if has_pi:
             level("π* acceptor", 0.25, middle, BLUE, False)
-            level("π donor", 0.68, middle, BLUE, True)
+            level("π donor", 0.70, middle, BLUE, True)
         if "n-pi" in kinds or "aryl-n-pi" in kinds:
-            donor_name = "n(N) donor" if any(atom.GetAtomicNum() == 7 and (is_amide_nitrogen(atom) or is_aryl_donor(atom)) for atom in mol.GetAtoms()) else "n donor"
+            donor_name = "n(N) donor" if any(
+                atom.GetAtomicNum() == 7 and (is_amide_nitrogen(atom) or is_aryl_donor(atom))
+                for atom in mol.GetAtoms()
+            ) else "n donor"
             level(donor_name, 0.48, left, ORANGE, True)
             if "π* acceptor" in levels:
                 curved_arrow(draw, levels[donor_name], levels["π* acceptor"], ORANGE, dashed=True, width=2)
-        if not ("n-pi" in kinds or "aryl-n-pi" in kinds):
-            draw.text((x0+28, y0+325), "No specific donor-acceptor interaction assigned.", font=small_font, fill=GRAY)
+        else:
+            draw.text((x0+28, y0+330), "No specific donor-acceptor interaction assigned.", font=small_font, fill=GRAY)
 
     draw.text((x0+12, y1-58), "dashed = possible donor→acceptor overlap", font=small_font, fill=GRAY)
     draw.text((x0+12, y1-40), "connectivity only; 3D alignment not tested", font=small_font, fill=GRAY)
     draw.text((x0+12, y1-22), "schematic levels, not computed HOMO/LUMO", font=small_font, fill=GRAY)
-
 
 def make_card(name):
     smiles = name_to_smiles(name)
@@ -632,7 +652,7 @@ def safe_filename(name):
 def main():
     st.set_page_config(page_title="OrgoCard", layout="wide")
     st.title("OrgoCard Generator")
-    st.caption("Structure annotations are automated study aids. Energy values are sampled force-field energies, not experimental thermodynamic data.")
+    st.caption("Structure annotations are automated study aids. Dipoles are qualitative; energy rankings are suppressed unless a defensible comparison exists.")
     col1, col2 = st.columns([3, 1])
     with col1:
         name = st.text_input("Molecule name or SMILES:", value="cis-1,2-difluoroethene")
@@ -646,7 +666,7 @@ def main():
                 png = get_card_image_bytes(name, CACHE_VERSION)
                 st.image(png, use_container_width=True)
                 st.download_button("Download PNG", png, f"{safe_filename(name)}.png", "image/png")
-                st.info("Dipole values are Gasteiger point-charge estimates. E/Z force-field rankings are suppressed. Orbital interactions are qualitative possibilities inferred from connectivity.")
+                st.info("Dipole arrows show only an approximate polarity direction. Numerical Gasteiger magnitudes are intentionally hidden. E/Z force-field rankings are suppressed.")
             except Exception as error:
                 st.error(f"Error generating molecule: {error}")
 
