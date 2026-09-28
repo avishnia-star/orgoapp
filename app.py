@@ -281,7 +281,7 @@ def annotate_structure(mol, box_size):
             mx += q*r.x
             my += q*r.y
         mu = math.hypot(mx, my) * 4.803
-        dip_x, dip_y = -mx, -my
+        dip_x, dip_y = -mx, my
     except:
         mu, dip_x, dip_y = 0, 0, 0
     
