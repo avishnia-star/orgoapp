@@ -452,9 +452,9 @@ def annotate_structure(mol, mu_3d, box_size):
     elif mu_3d > 0.15:
         direction = projected_dipole_direction(md, pos)
         if direction:
-            center = (bx+80,by+65)
-            tip = (center[0]+direction[0]*45, center[1]+direction[1]*45)
-            tail = (center[0]-direction[0]*45, center[1]-direction[1]*45)
+            center = (bx+80,by+56)
+            tip = (center[0]+direction[0]*32, center[1]+direction[1]*32)
+            tail = (center[0]-direction[0]*32, center[1]-direction[1]*32)
             draw.line((tail,tip), fill=BLACK, width=3)
             arrow_head(draw, tip, direction, BLACK)
             draw.line((tail[0]-direction[1]*7,tail[1]+direction[0]*7,tail[0]+direction[1]*7,tail[1]-direction[0]*7), fill=BLACK, width=3)
@@ -475,17 +475,36 @@ def annotate_structure(mol, mu_3d, box_size):
 
 
 def energy_items(mol):
-    current_name = ", ".join(stereo_label(mol)) or "input structure"
-    _, energy, method, _ = minimum_energy(mol, 42)
-    other = opposite_alkene_isomer(mol)
-    if other is not None and energy is not None:
-        _, other_energy, other_method, _ = minimum_energy(other, 314)
-        if other_energy is not None and other_method == method:
-            return [(current_name,energy,True),(", ".join(stereo_label(other)) or "other stereoisomer",other_energy,False)], f"sampled stereoisomers ({method})", "Lowest sampled force-field conformer; not experimental ΔG."
-    if energy is not None:
-        return [], f"one optimized conformer ({method})", "No comparable second state; relative energy is not shown."
-    return [], "calculation unavailable", "No supported force-field result was obtained."
+    """Return only chemically defensible relative-energy displays.
 
+    MMFF/UFF E/Z rankings are intentionally suppressed because a force field
+    can predict the wrong ordering for stereoisomers such as
+    1,2-difluoroethene. The panel is reserved for future same-stereoisomer
+    conformer comparisons.
+    """
+    current_name = ", ".join(stereo_label(mol)) or "input structure"
+    has_assigned_ez = any("=" in label and label.endswith((":E", ":Z")) for label in stereo_label(mol))
+
+    if has_assigned_ez:
+        return (
+            [],
+            "stereoisomer comparison suppressed",
+            "MMFF/UFF may not reproduce experimental cis effects."
+        )
+
+    _, energy, method, _ = minimum_energy(mol, 42)
+    if energy is not None:
+        return (
+            [],
+            f"one optimized conformer ({method})",
+            "No comparable second conformer; relative energy is not shown."
+        )
+
+    return (
+        [],
+        "calculation unavailable",
+        "No supported force-field result was obtained."
+    )
 
 def draw_energy_panel(image, box, items, kind, note):
     draw = ImageDraw.Draw(image)
@@ -496,8 +515,10 @@ def draw_energy_panel(image, box, items, kind, note):
 
     if len(items) < 2:
         draw.text((x0+28, y0+145), "No relative-energy comparison", font=font(19, True), fill=GRAY)
-        draw.text((x0+28, y0+180), "Only one optimized state is available.", font=fs, fill=GRAY)
-        draw.text((x0+28, y0+202), "A self-relative +0.00 level is not displayed.", font=fs, fill=GRAY)
+        message = ("E/Z force-field ranking is intentionally hidden." if "stereoisomer" in kind else "Only one optimized state is available.")
+        draw.text((x0+28, y0+180), message, font=fs, fill=GRAY)
+        detail = ("Use curated experimental data for cis/trans stability." if "stereoisomer" in kind else "A self-relative +0.00 level is not displayed.")
+        draw.text((x0+28, y0+202), detail, font=fs, fill=GRAY)
         draw.text((x0+12, y1-42), note if len(note) <= 62 else note[:59]+"...", font=fs, fill=RED)
         return
 
@@ -522,30 +543,74 @@ def draw_energy_panel(image, box, items, kind, note):
     draw.text((x0+12, y1-42), note if len(note) <= 62 else note[:59]+"...", font=fs, fill=RED)
 
 def draw_mo_panel(image, box, mol, candidates):
-    draw=ImageDraw.Draw(image); x0,y0,x1,y1=box; fh,fs=font(17,True),font(13)
-    draw.rectangle(box,outline=GRAY); draw.text((x0+12,y0+8),"Orbital picture (qualitative)",font=fh,fill=BLACK)
-    has_pi=any(b.GetBondType() in (Chem.BondType.DOUBLE,Chem.BondType.TRIPLE,Chem.BondType.AROMATIC) for b in mol.GetBonds())
-    has_lp=any((lone_pairs(a) or 0)>0 for a in mol.GetAtoms())
-    kinds={c[4] for c in candidates}; levels={}; height=y1-y0
-    def level(name,fraction,x,color,occupied):
-        y=y0+fraction*height; draw.line((x,y,x+90,y),fill=color,width=4); levels[name]=(x+45,y)
-        draw.text((x+95,y),name,font=fs,fill=color,anchor="lm")
-        if occupied:
-            draw.text((x+30,y-3),"↑",font=font(20,True),fill=color,anchor="mb"); draw.text((x+52,y-3),"↓",font=font(20,True),fill=color,anchor="mb")
-    left,middle=x0+30,x0+220
-    if has_pi:
-        level("π* acceptor",0.25,middle,BLUE,False); level("π donor",0.68,middle,BLUE,True)
-    else:
-        level("σ* acceptor",0.25,middle,BLUE,False); level("σ bond",0.78,middle,BLUE,True)
-    if has_lp: level("n(N) donor" if any(is_amide_nitrogen(a) for a in mol.GetAtoms()) else "n lone pair",0.50,left,ORANGE,True)
-    level("σ(C-H)",0.86,left,GREEN,True)
-    if "sigma-pi" in kinds and "π* acceptor" in levels: curved_arrow(draw,levels["σ(C-H)"],levels["π* acceptor"],GREEN,dashed=True,width=2)
-    n_name = "n(N) donor" if "n(N) donor" in levels else "n lone pair"
-    if "n-pi" in kinds and n_name in levels and "π* acceptor" in levels: curved_arrow(draw,levels[n_name],levels["π* acceptor"],ORANGE,dashed=True,width=2)
-    draw.text((x0+12,y1-58),"dashed = possible donor→acceptor overlap",font=fs,fill=GRAY)
-    draw.text((x0+12,y1-40),"connectivity only; 3D alignment not tested",font=fs,fill=GRAY)
-    draw.text((x0+12,y1-22),"schematic levels, not computed HOMO/LUMO",font=fs,fill=GRAY)
+    draw = ImageDraw.Draw(image)
+    x0, y0, x1, y1 = box
+    fh, fs = font(17, True), font(13)
+    draw.rectangle(box, outline=GRAY)
+    draw.text((x0+12, y0+8), "Orbital picture (qualitative)", font=fh, fill=BLACK)
 
+    has_pi = any(
+        bond.GetBondType() in (
+            Chem.BondType.DOUBLE,
+            Chem.BondType.TRIPLE,
+            Chem.BondType.AROMATIC,
+        )
+        for bond in mol.GetBonds()
+    )
+    kinds = {candidate[4] for candidate in candidates}
+    has_n_pi = "n-pi" in kinds
+    has_sigma_p = "sigma-pi" in kinds
+    amide_present = any(is_amide_nitrogen(atom) for atom in mol.GetAtoms())
+
+    levels = {}
+    panel_height = y1-y0
+
+    def level(name, fraction, x, color, occupied):
+        y = y0 + fraction*panel_height
+        draw.line((x, y, x+90, y), fill=color, width=4)
+        levels[name] = (x+45, y)
+        draw.text((x+95, y), name, font=fs, fill=color, anchor="lm")
+        if occupied:
+            draw.text((x+30, y-3), "↑", font=font(20, True), fill=color, anchor="mb")
+            draw.text((x+52, y-3), "↓", font=font(20, True), fill=color, anchor="mb")
+
+    left = x0+30
+    middle = x0+220
+
+    if has_pi:
+        level("π* acceptor", 0.25, middle, BLUE, False)
+        level("π donor", 0.68, middle, BLUE, True)
+    else:
+        level("σ* acceptor", 0.25, middle, BLUE, False)
+        level("σ bond", 0.72, middle, BLUE, True)
+
+    if has_n_pi:
+        n_name = "n(N) donor" if amide_present else "n donor"
+        level(n_name, 0.48, left, ORANGE, True)
+        if "π* acceptor" in levels:
+            curved_arrow(
+                draw, levels[n_name], levels["π* acceptor"], ORANGE,
+                dashed=True, width=2
+            )
+
+    if has_sigma_p:
+        level("σ(C-H) donor", 0.86, left, GREEN, True)
+        acceptor_name = "π* acceptor" if "π* acceptor" in levels else "σ* acceptor"
+        curved_arrow(
+            draw, levels["σ(C-H) donor"], levels[acceptor_name], GREEN,
+            dashed=True, width=2
+        )
+
+    if not has_n_pi and not has_sigma_p:
+        draw.text(
+            (x0+28, y0+325),
+            "No specific donor-acceptor interaction assigned.",
+            font=fs, fill=GRAY
+        )
+
+    draw.text((x0+12, y1-58), "dashed = possible donor→acceptor overlap", font=fs, fill=GRAY)
+    draw.text((x0+12, y1-40), "connectivity only; 3D alignment not tested", font=fs, fill=GRAY)
+    draw.text((x0+12, y1-22), "schematic levels, not computed HOMO/LUMO", font=fs, fill=GRAY)
 
 def make_card(name):
     smiles=name_to_smiles(name); mol=Chem.MolFromSmiles(smiles)
