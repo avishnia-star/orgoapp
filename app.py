@@ -19,7 +19,7 @@ def font(size, bold=False):
     elif system == "Windows":
         fonts = ["arialbd.ttf"] if bold else ["arial.ttf"]
     else: # Linux
-        fonts = ["DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf"] if bold else ["DejaVuSans.ttf", "LiberationSans-Regular.ttf"]
+        fonts = ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"] if bold else ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
         
     for n in fonts:
         try: 
