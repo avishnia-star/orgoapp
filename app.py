@@ -299,33 +299,75 @@ def draw_structure(mol, size):
     return md, image, pos
 
 
+def is_amide_nitrogen(atom):
+    """Return True for a neutral N directly bonded to a carbonyl carbon."""
+    if atom.GetAtomicNum() != 7 or atom.GetFormalCharge() > 0:
+        return False
+    for carbon in atom.GetNeighbors():
+        if carbon.GetAtomicNum() != 6:
+            continue
+        for bond in carbon.GetBonds():
+            other = bond.GetOtherAtom(carbon)
+            if other.GetIdx() == atom.GetIdx():
+                continue
+            if other.GetAtomicNum() in (8, 16) and bond.GetBondType() == Chem.BondType.DOUBLE:
+                return True
+    return False
+
+
 def hybridization_label(atom):
     if atom.GetIsAromatic():
         return "sp² (arom.)"
+    if is_amide_nitrogen(atom):
+        return "sp²-like"
     return {SP: "sp", SP2: "sp²", SP3: "sp³"}.get(atom.GetHybridization(), "")
 
 
 def interaction_candidates(md, pos):
+    """Return conservative, connectivity-based orbital/resonance annotations."""
     candidates = []
     try:
-        pi_atoms = {i for b in md.GetBonds() if b.GetBondType() in (Chem.BondType.DOUBLE, Chem.BondType.TRIPLE, Chem.BondType.AROMATIC)
-                    for i in (b.GetBeginAtomIdx(), b.GetEndAtomIdx())}
-        for atom in md.GetAtoms():
-            if atom.GetIdx() not in pi_atoms and atom.GetFormalCharge() <= 0:
-                continue
-            for carbon in atom.GetNeighbors():
-                hydrogens = [n for n in carbon.GetNeighbors() if n.GetAtomicNum() == 1]
-                if carbon.GetAtomicNum() == 6 and carbon.GetHybridization() == SP3 and hydrogens:
-                    candidates.append((mid(pos[carbon.GetIdx()], pos[hydrogens[0].GetIdx()]), pos[atom.GetIdx()], GREEN,
-                                       "possible σ(C-H)→π*/p", "sigma-pi"))
+        # Amide resonance is the central interaction: n(N) donation toward C-N,
+        # accompanied by movement of the C=O pi pair toward oxygen.
+        amide = Chem.MolFromSmarts("[N;X3;!+]-[C](=[O,S])")
+        for n_idx, c_idx, o_idx in md.GetSubstructMatches(amide):
+            candidates.append((
+                pos[n_idx], mid(pos[n_idx], pos[c_idx]), ORANGE,
+                "amide resonance", "n-pi"
+            ))
+            candidates.append((
+                mid(pos[c_idx], pos[o_idx]), pos[o_idx], ORANGE,
+                None, "resonance-shift"
+            ))
+
+        # Lone-pair conjugation for non-amide heteroatoms adjacent to a pi bond.
         pattern = Chem.MolFromSmarts("[N,O,S;!+]-[#6,#7,#8]=[#6,#7,#8]")
         for hetero, c1, c2 in md.GetSubstructMatches(pattern):
-            if (lone_pairs(md.GetAtomWithIdx(hetero)) or 0) > 0:
-                candidates.append((pos[hetero], mid(pos[c1], pos[c2]), ORANGE, "possible n/π conjugation", "n-pi"))
+            atom = md.GetAtomWithIdx(hetero)
+            if is_amide_nitrogen(atom):
+                continue
+            if (lone_pairs(atom) or 0) > 0:
+                candidates.append((
+                    pos[hetero], mid(pos[c1], pos[c2]), ORANGE,
+                    "possible n/π conjugation", "n-pi"
+                ))
+
+        # Sigma donation is shown only next to an electron-deficient p center,
+        # not automatically for every C-H bond adjacent to an ordinary pi bond.
+        for acceptor in md.GetAtoms():
+            if not (acceptor.GetFormalCharge() > 0 or acceptor.GetNumRadicalElectrons() > 0):
+                continue
+            for carbon in acceptor.GetNeighbors():
+                hydrogens = [n for n in carbon.GetNeighbors() if n.GetAtomicNum() == 1]
+                if carbon.GetAtomicNum() == 6 and carbon.GetHybridization() == SP3 and hydrogens:
+                    candidates.append((
+                        mid(pos[carbon.GetIdx()], pos[hydrogens[0].GetIdx()]),
+                        pos[acceptor.GetIdx()], GREEN,
+                        "possible σ(C-H)→p", "sigma-pi"
+                    ))
     except Exception:
         pass
     return candidates[:6]
-
 
 def projected_dipole_direction(md, pos):
     try:
@@ -358,6 +400,20 @@ def annotate_structure(mol, mu_3d, box_size):
             for sign, color in ((1, (60,110,230,95)), (-1, (230,80,80,95))):
                 center = (p[0]+sign*perp[0]*26, p[1]+sign*perp[1]*26)
                 od.polygon(ellipse_pts(center, (sign*perp[0], sign*perp[1]), 22, 11), fill=color, outline=color[:3]+(200,))
+    # Extend the conjugated p system onto amide nitrogen.
+    for atom in md.GetAtoms():
+        if not is_amide_nitrogen(atom):
+            continue
+        p = pos[atom.GetIdx()]
+        carbonyl_c = next((n for n in atom.GetNeighbors() if n.GetAtomicNum() == 6), None)
+        if carbonyl_c is None:
+            continue
+        q = pos[carbonyl_c.GetIdx()]
+        bond_direction = unit((q[0]-p[0], q[1]-p[1]))
+        perp = (-bond_direction[1], bond_direction[0])
+        for sign, color in ((1, (60,110,230,95)), (-1, (230,80,80,95))):
+            center = (p[0]+sign*perp[0]*26, p[1]+sign*perp[1]*26)
+            od.polygon(ellipse_pts(center, (sign*perp[0], sign*perp[1]), 22, 11), fill=color, outline=color[:3]+(200,))
     image = Image.alpha_composite(image, overlay)
     draw = ImageDraw.Draw(image)
     for atom in md.GetAtoms():
@@ -402,7 +458,8 @@ def annotate_structure(mol, mu_3d, box_size):
             draw.line((tail,tip), fill=BLACK, width=3)
             arrow_head(draw, tip, direction, BLACK)
             draw.line((tail[0]-direction[1]*7,tail[1]+direction[0]*7,tail[0]+direction[1]*7,tail[1]-direction[0]*7), fill=BLACK, width=3)
-        draw.text((bx+8,height-32), f"≈ {mu_3d:.1f} D*", font=fxs, fill=GRAY)
+        draw.text((bx+8,height-43), f"≈ {mu_3d:.1f} D", font=fxs, fill=GRAY)
+        draw.text((bx+8,height-27), "Gasteiger estimate", font=font(11), fill=GRAY)
     else:
         draw.text((bx+30,by+45), "μ ≈ 0", font=font(22,True), fill=BLACK)
         draw.text((bx+8,height-32), "point-charge est.", font=fxs, fill=GRAY)
@@ -411,7 +468,7 @@ def annotate_structure(mol, mu_3d, box_size):
     draw.text((lx+32,ly), "schematic p orbital", font=fxs, fill=BLACK)
     draw.ellipse((lx+8,ly+22,lx+14,ly+28), fill=RED); draw.ellipse((lx+17,ly+22,lx+23,ly+28), fill=RED)
     draw.text((lx+32,ly+18), "estimated lone pair", font=fxs, fill=BLACK)
-    for i,(color,text) in enumerate(((GREEN,"possible σ→π*/p"),(ORANGE,"possible n/π conjugation"))):
+    for i,(color,text) in enumerate(((GREEN,"possible σ→p at cation/radical"),(ORANGE,"resonance / n-π conjugation"))):
         draw.line((lx+4,ly+44+i*18,lx+26,ly+44+i*18), fill=color, width=3)
         draw.text((lx+32,ly+36+i*18), text, font=fxs, fill=BLACK)
     return image.convert("RGB"), candidates
@@ -426,33 +483,43 @@ def energy_items(mol):
         if other_energy is not None and other_method == method:
             return [(current_name,energy,True),(", ".join(stereo_label(other)) or "other stereoisomer",other_energy,False)], f"sampled stereoisomers ({method})", "Lowest sampled force-field conformer; not experimental ΔG."
     if energy is not None:
-        return [(current_name,energy,True)], f"one sampled minimum ({method})", "Absolute force-field energy is not an experimental stability value."
-    return [("unavailable",0.0,False)], "calculation unavailable", "No supported force-field result was obtained."
+        return [], f"one optimized conformer ({method})", "No comparable second state; relative energy is not shown."
+    return [], "calculation unavailable", "No supported force-field result was obtained."
 
 
 def draw_energy_panel(image, box, items, kind, note):
     draw = ImageDraw.Draw(image)
-    x0,y0,x1,y1 = box
-    fh,fs = font(17,True),font(13)
+    x0, y0, x1, y1 = box
+    fh, fs = font(17, True), font(13)
     draw.rectangle(box, outline=GRAY)
-    draw.text((x0+12,y0+8), f"Energy  ({kind})", font=fh, fill=BLACK)
-    energies = [e for _,e,_ in items]
-    minimum = min(energies)
-    span = max(max(e-minimum for e in energies),1.0)
-    top,bottom = y0+65,y1-85
-    item_width = (x1-x0-70)/max(len(items),1)
-    draw.line((x0+30,bottom+15,x0+30,top-10), fill=BLACK, width=2)
-    arrow_head(draw,(x0+30,top-10),(0,-1),BLACK)
-    draw.text((x0+18,top-28),"E",font=fs,fill=BLACK)
-    for i,(label,e,current) in enumerate(items):
-        rel=e-minimum; y=bottom-rel/span*(bottom-top); xa=x0+50+i*item_width; xb=xa+item_width-20
-        color=BLUE if current else GRAY
-        draw.line((xa,y,xb,y),fill=color,width=6)
-        draw.text(((xa+xb)/2,y-6),f"{rel:+.2f} kcal/mol",font=fs,fill=color,anchor="mb")
-        shown=label if len(label)<=23 else label[:20]+"..."
-        draw.text(((xa+xb)/2,y+8),shown+("  ◀ input" if current else ""),font=fs,fill=color,anchor="mt")
-    draw.text((x0+12,y1-42),note if len(note)<=62 else note[:59]+"...",font=fs,fill=RED)
+    draw.text((x0+12, y0+8), f"Energy  ({kind})", font=fh, fill=BLACK)
 
+    if len(items) < 2:
+        draw.text((x0+28, y0+145), "No relative-energy comparison", font=font(19, True), fill=GRAY)
+        draw.text((x0+28, y0+180), "Only one optimized state is available.", font=fs, fill=GRAY)
+        draw.text((x0+28, y0+202), "A self-relative +0.00 level is not displayed.", font=fs, fill=GRAY)
+        draw.text((x0+12, y1-42), note if len(note) <= 62 else note[:59]+"...", font=fs, fill=RED)
+        return
+
+    energies = [e for _, e, _ in items]
+    minimum = min(energies)
+    span = max(max(e-minimum for e in energies), 1.0)
+    top, bottom = y0+65, y1-85
+    item_width = (x1-x0-70)/len(items)
+    draw.line((x0+30, bottom+15, x0+30, top-10), fill=BLACK, width=2)
+    arrow_head(draw, (x0+30, top-10), (0, -1), BLACK)
+    draw.text((x0+18, top-28), "E", font=fs, fill=BLACK)
+    for i, (label, energy, current) in enumerate(items):
+        relative = energy-minimum
+        y = bottom-relative/span*(bottom-top)
+        xa = x0+50+i*item_width
+        xb = xa+item_width-20
+        color = BLUE if current else GRAY
+        draw.line((xa, y, xb, y), fill=color, width=6)
+        draw.text(((xa+xb)/2, y-6), f"{relative:+.2f} kcal/mol", font=fs, fill=color, anchor="mb")
+        shown = label if len(label) <= 23 else label[:20]+"..."
+        draw.text(((xa+xb)/2, y+8), shown+("  ◀ input" if current else ""), font=fs, fill=color, anchor="mt")
+    draw.text((x0+12, y1-42), note if len(note) <= 62 else note[:59]+"...", font=fs, fill=RED)
 
 def draw_mo_panel(image, box, mol, candidates):
     draw=ImageDraw.Draw(image); x0,y0,x1,y1=box; fh,fs=font(17,True),font(13)
@@ -470,10 +537,11 @@ def draw_mo_panel(image, box, mol, candidates):
         level("π* acceptor",0.25,middle,BLUE,False); level("π donor",0.68,middle,BLUE,True)
     else:
         level("σ* acceptor",0.25,middle,BLUE,False); level("σ bond",0.78,middle,BLUE,True)
-    if has_lp: level("n lone pair",0.50,left,ORANGE,True)
+    if has_lp: level("n(N) donor" if any(is_amide_nitrogen(a) for a in mol.GetAtoms()) else "n lone pair",0.50,left,ORANGE,True)
     level("σ(C-H)",0.86,left,GREEN,True)
     if "sigma-pi" in kinds and "π* acceptor" in levels: curved_arrow(draw,levels["σ(C-H)"],levels["π* acceptor"],GREEN,dashed=True,width=2)
-    if "n-pi" in kinds and "n lone pair" in levels and "π* acceptor" in levels: curved_arrow(draw,levels["n lone pair"],levels["π* acceptor"],ORANGE,dashed=True,width=2)
+    n_name = "n(N) donor" if "n(N) donor" in levels else "n lone pair"
+    if "n-pi" in kinds and n_name in levels and "π* acceptor" in levels: curved_arrow(draw,levels[n_name],levels["π* acceptor"],ORANGE,dashed=True,width=2)
     draw.text((x0+12,y1-58),"dashed = possible donor→acceptor overlap",font=fs,fill=GRAY)
     draw.text((x0+12,y1-40),"connectivity only; 3D alignment not tested",font=fs,fill=GRAY)
     draw.text((x0+12,y1-22),"schematic levels, not computed HOMO/LUMO",font=fs,fill=GRAY)
